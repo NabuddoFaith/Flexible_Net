@@ -25,12 +25,10 @@ Export.table.toDrive({
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
             .filterBounds(studyarea)
             .filterDate('2017-01-01','2017-12-31')
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',10)); // relaxed
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',10));
 
-// DEBUG: check if data exists
 print('Number of images:', s2.size());
 
-// Use median safely
 var s2_image = ee.Algorithms.If(
   s2.size().gt(0),
   s2.median(),
@@ -39,16 +37,13 @@ var s2_image = ee.Algorithms.If(
 
 s2_image = ee.Image(s2_image).clip(studyarea);
 
-// Select 10m bands (DO NOT force reprojection here)
 var s2_10m = s2_image.select(['B2','B3','B4','B8']);
 
-// Display
 Map.addLayer(s2_10m,
   {bands:['B4','B3','B2'], min:0, max:3000},
   'Sentinel-2 2017'
 );
 
-// Export Sentinel-2 (force resolution HERE instead)
 Export.image.toDrive({
   image: s2_10m,
   description: 'Sentinel2_2017_10m',
@@ -64,7 +59,6 @@ Export.image.toDrive({
 var chm = ee.Image("NASA/JPL/global_forest_canopy_height_2005")
             .clip(studyarea);
 
-// Only resample (no heavy reprojection)
 var chm_resampled = chm.resample('bilinear');
 
 Map.addLayer(chm_resampled,
@@ -72,7 +66,6 @@ Map.addLayer(chm_resampled,
   'CHM'
 );
 
-// Export CHM at 10m
 Export.image.toDrive({
   image: chm_resampled,
   description: 'CHM_10m',
@@ -83,31 +76,62 @@ Export.image.toDrive({
 });
 
 // -----------------------------
-// 4. Vegetation Indices
+// 4. Vegetation Indices (FIXED)
 // -----------------------------
-var avi = s2_10m.expression(
-  'sqrt((NIR + 1)*(NIR - RED))', {
-    'NIR': s2_10m.select('B8'),
-    'RED': s2_10m.select('B4')
-}).clip(studyarea);
 
-var bi = s2_10m.expression(
-  '(RED - NIR)/(RED + NIR)', {
-    'NIR': s2_10m.select('B8'),
-    'RED': s2_10m.select('B4')
-}).clip(studyarea);
+var s2_scaled = s2_10m.divide(10000);
 
-var si = s2_10m.expression(
-  '(GREEN + RED)/(BLUE + GREEN)', {
-    'BLUE': s2_10m.select('B2'),
-    'GREEN': s2_10m.select('B3'),
-    'RED': s2_10m.select('B4')
-}).clip(studyarea);
+var nir = s2_scaled.select('B8');
+var red = s2_scaled.select('B4');
+var green = s2_scaled.select('B3');
+var blue = s2_scaled.select('B2');
 
-// Display
-Map.addLayer(avi, {min:0, max:5, palette:['white','green']}, 'AVI');
-Map.addLayer(bi, {min:-1, max:1, palette:['brown','yellow']}, 'BI');
-Map.addLayer(si, {min:0, max:5, palette:['white','black']}, 'SI');
+// AVI
+var avi = nir.subtract(red)
+              .max(0)
+              .multiply(nir.add(1))
+              .sqrt()
+              .rename('AVI')
+              .clip(studyarea);
+
+// BI
+var bi = red.subtract(nir)
+            .divide(red.add(nir))
+            .rename('BI')
+            .clip(studyarea);
+
+// SI
+var si = red.add(green)
+            .divide(blue.add(green))
+            .rename('SI')
+            .clip(studyarea);
+
+// Dynamic stretch for AVI
+var stats = avi.reduceRegion({
+  reducer: ee.Reducer.percentile([2, 98]),
+  geometry: studyarea,
+  scale: 10,
+  maxPixels: 1e9
+});
+
+var minAVI = ee.Number(stats.get('AVI_p2')).getInfo();
+var maxAVI = ee.Number(stats.get('AVI_p98')).getInfo();
+
+Map.addLayer(avi, {
+  min: minAVI,
+  max: maxAVI,
+  palette: ['white','yellow','green','darkgreen']
+}, 'AVI (Stretched)');
+
+Map.addLayer(bi, {
+  min: -1, max: 1,
+  palette: ['brown','yellow']
+}, 'BI');
+
+Map.addLayer(si, {
+  min: 0, max: 2,
+  palette: ['white','black']
+}, 'SI');
 
 // Export indices
 Export.image.toDrive({
@@ -136,3 +160,59 @@ Export.image.toDrive({
   fileFormat: 'GeoTIFF',
   maxPixels: 1e10
 });
+
+// -----------------------------
+// 5. NDVI
+// -----------------------------
+var ndvi = s2_scaled.normalizedDifference(['B8','B4'])
+                    .rename('NDVI')
+                    .clip(studyarea);
+
+Map.addLayer(ndvi, {
+  min: -1, max: 1,
+  palette: ['blue','white','green']
+}, 'NDVI 2017');
+
+Export.image.toDrive({
+  image: ndvi,
+  description: 'NDVI_2017',
+  scale: 10,
+  region: studyarea,
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e10
+});
+
+// -----------------------------
+// 6. Canopy Density Model (CDM)
+// -----------------------------
+
+// Normalize layers
+var avi_norm = avi.unitScale(minAVI, maxAVI);
+var si_norm = si.unitScale(0, 2);
+var chm_norm = chm_resampled.unitScale(0, 50);
+
+// Combine
+var cdm = avi_norm
+            .add(si_norm)
+            .add(chm_norm)
+            .divide(3)
+            .rename('CDM')
+            .clip(studyarea);
+
+Map.addLayer(cdm, {
+  min: 0, max: 1,
+  palette: ['white','yellow','green','darkgreen']
+}, 'Canopy Density Model');
+
+Export.image.toDrive({
+  image: cdm,
+  description: 'CDM_2017',
+  scale: 10,
+  region: studyarea,
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e10
+});
+
+// -----------------------------
+// END
+// -----------------------------
