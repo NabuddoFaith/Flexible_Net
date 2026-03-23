@@ -1,49 +1,42 @@
-//Canopy Density Model (CDM) (often referred to as the Forest Canopy Density (FCD) model) using your existing indices, we use the methodology developed by Rikimaru
 // -------------------------------------------------------------
-// 7. Calculate Canopy Density Model (CDM / FCD)
+// 7. Calculate Canopy Density Model (CDM / FCD) - OPTIMIZED
 // -------------------------------------------------------------
 
-// Step A: Corrected Normalization Function
-var normalize = function(image) {
-  var bandName = ee.String(image.bandNames().get(0));
-  
-  var minMax = image.reduceRegion({
-    reducer: ee.Reducer.minMax(),
-    geometry: studyarea,
-    scale: 30,
-    maxPixels: 1e10
-  });
+// Step A: Calculate Min/Max for ALL indices in ONE go (Memory Efficient)
+var combinedIndices = ee.Image([avi, bi, si]);
 
-  // Access the keys using .cat() to append '_min' and '_max'
-  var min = ee.Number(minMax.get(bandName.cat('_min')));
-  var max = ee.Number(minMax.get(bandName.cat('_max')));
-  
-  // Manual unit scale: (Pixel - Min) / (Max - Min)
-  // We clamp it to 0-1 to handle any mathematical outliers
-  return image.subtract(min).divide(max.subtract(min)).clamp(0, 1);
-};
+var stats = combinedIndices.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: studyarea,
+  scale: 60, // Increased scale slightly to 60m to save memory; won't affect final 10m quality
+  maxPixels: 1e10
+});
 
-// Apply normalization to your indices
-var avi_n = normalize(avi);
-var bi_n  = normalize(bi);
-var si_n  = normalize(si);
+// Step B: Manual Normalization using the shared stats
+var avi_n = avi.subtract(ee.Number(stats.get('AVI_min')))
+               .divide(ee.Number(stats.get('AVI_max')).subtract(ee.Number(stats.get('AVI_min'))))
+               .clamp(0, 1);
 
-// Step B: Calculate Vegetation Density (VD)
-// Logic: High Vegetation (AVI) paired with Low Soil (1 - BI)
+var bi_n  = bi.subtract(ee.Number(stats.get('BI_min')))
+               .divide(ee.Number(stats.get('BI_max')).subtract(ee.Number(stats.get('BI_min'))))
+               .clamp(0, 1);
+
+var si_n  = si.subtract(ee.Number(stats.get('SI_min')))
+               .divide(ee.Number(stats.get('SI_max')).subtract(ee.Number(stats.get('SI_min'))))
+               .clamp(0, 1);
+
+// Step C: Calculate Vegetation Density (VD)
 var vd = avi_n.multiply(ee.Image(1).subtract(bi_n)).sqrt().rename('VD');
 
-// Step C: Calculate the Canopy Density Model (CDM)
-// Logic: Combine Vegetation Density with Shadow Index (SI)
+// Step D: Calculate the Canopy Density Model (CDM)
 var cdm = vd.multiply(si_n).sqrt().multiply(100).rename('CDM');
 
-// Step D: Apply CHM Height Mask (Only density where height > 2 meters)
-// This ensures we are mapping trees, not high-density grass/crops
+// Step E: Apply CHM Height Mask
 var cdm_masked = cdm.updateMask(chm.gt(2));
 
 // -------------------------------------------------------------
 // 8. Display and Export CDM
 // -------------------------------------------------------------
-
 Map.addLayer(cdm_masked, {
   min: 0, 
   max: 100, 
