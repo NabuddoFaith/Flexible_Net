@@ -1,0 +1,1 @@
+first runn the finalstatif.js in GEE then open google colab and run the training.py file then finally run the flexible net
